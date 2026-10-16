@@ -1,0 +1,118 @@
+{
+    "ver": "1.0.0",
+    "authors": [
+        "ac.psengupta1"
+    ],
+    "contact": "http://kbase.us/contact-us/",
+    "visible": true,
+    "categories": ["active"],
+    "widgets": {
+        "input": null,
+        "output": "kbaseNarrativeOutputCell"
+    },
+    "parameters": [
+        {
+            "id": "input_fba_model",
+            "optional": false,
+            "advanced": false,
+            "allow_multiple": false,
+            "default_values": [""],
+            "field_type": "text",
+            "text_options": {
+                "valid_ws_types": ["KBaseFBA.FBAModel"]
+            }
+        },
+        {
+            "id": "seeds",
+            "optional": false,
+            "advanced": false,
+            "allow_multiple": true,
+            "default_values": [""],
+            "field_type": "text",
+            "text_options": {
+                "validate_as": "string"
+            }
+        },
+        {
+            "id": "sources",
+            "optional": false,
+            "advanced": false,
+            "allow_multiple": true,
+            "default_values": [""],
+            "field_type": "text",
+            "text_options": {
+                "validate_as": "string"
+            }
+        },
+        {
+            "id": "targets",
+            "optional": false,
+            "advanced": false,
+            "allow_multiple": true,
+            "default_values": [""],
+            "field_type": "text",
+            "text_options": {
+                "validate_as": "string"
+            }
+        },
+        {
+            "id": "cutoff",
+            "optional": false,
+            "advanced": false,
+            "allow_multiple": false,
+            "default_values": ["5"],
+            "field_type": "text",
+            "text_options": {
+                "validate_as": "int",
+                "min_int": 1,
+                "max_int": 50
+            }
+        }
+    ],
+    "behavior": {
+        "service-mapping": {
+            "url": "",
+            "name": "MetQuest",
+            "method": "run_metquest",
+            "input_mapping": [
+                {
+                    "narrative_system_variable": "workspace",
+                    "target_property": "workspace_name"
+                },
+                {
+                    "input_parameter": "input_fba_model",
+                    "target_property": "input_fba_model",
+                    "target_type_transform": "resolved-ref"
+                },
+                {
+                    "input_parameter": "seeds",
+                    "target_property": "seeds"
+                },
+                {
+                    "input_parameter": "sources",
+                    "target_property": "sources"
+                },
+                {
+                    "input_parameter": "targets",
+                    "target_property": "targets"
+                },
+                {
+                    "input_parameter": "cutoff",
+                    "target_property": "cutoff",
+                    "target_type_transform": "int"
+                }
+            ],
+            "output_mapping": [
+                {
+                    "service_method_output_path": [0, "report_name"],
+                    "target_property": "report_name"
+                },
+                {
+                    "service_method_output_path": [0, "report_ref"],
+                    "target_property": "report_ref"
+                }
+            ]
+        }
+    },
+    "job_id_output_field": "docker"
+}

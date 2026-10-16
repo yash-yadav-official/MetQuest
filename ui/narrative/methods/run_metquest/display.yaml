@@ -1,0 +1,48 @@
+name: Run MetQuest Pathway Analysis
+
+tooltip: |
+    Identify all possible metabolic pathways from genome-scale reconstructions using dynamic programming.
+
+screenshots: []
+icon: icon.png
+
+subtitle: |
+    MetQuest computes acyclic, branched, and cyclic pathways between specified seed, source, and target metabolites.
+
+suggestions:
+    apps:
+        related:
+            []
+        next:
+            []
+
+parameters:
+    input_fba_model:
+        ui-name: |
+            Metabolic Model
+        short-hint: |
+            Select the genome-scale FBA model (COBRA compatible) to analyze.
+    seeds:
+        ui-name: |
+            Seed Metabolites
+        short-hint: |
+            Enter the list of seed metabolites present in the environment (one per entry).
+    sources:
+        ui-name: |
+            Source Metabolites
+        short-hint: |
+            Enter the starting/source metabolites for the pathway search.
+    targets:
+        ui-name: |
+            Target Metabolites
+        short-hint: |
+            Enter the destination/target metabolites you want the pathways to reach.
+    cutoff:
+        ui-name: |
+            Pathway Length Cutoff
+        short-hint: |
+            Maximum number of reaction steps allowed in a calculated pathway (1 to 50).
+
+description: |
+    <p>MetQuest is a dynamic programming-based algorithm designed by the Raman Lab at IIT Madras for identifying all possible pathways within metabolic networks between designated source and target metabolites.</p>
+    <p>By defining specific environmental seed conditions and an upper bound pathway length cutoff, MetQuest systematically maps out cyclic, acyclic, and branched reaction routes, providing deep insights into metabolic engineering capabilities and path generation constraints.</p>
