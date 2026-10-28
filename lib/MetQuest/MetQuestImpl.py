@@ -60,8 +60,91 @@ class MetQuest:
         # ctx is the context object
         # return variables are: output
         #BEGIN run_metquest
-        #END run_metquest
+        print(f"Starting MetQuest run with params: {params}")
+        
+        # 1. Setup workspace & paths
+        ws_name = params['workspace_name']
+        scratch = self.shared_folder
+        output_dir = os.path.join(scratch, "metquest_output")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 2. Initialize clients
+        dfu = DataFileUtil(self.callback_url)
+        fba = fba_tools(self.callback_url)
+        
+        # 3. Export FBAModel to SBML file
+        model_ref = params['input_fba_model']
+        print(f"Exporting model {model_ref} to SBML...")
+        export_result = fba.export_object_as_sbml({
+            'input_ref': model_ref,
+            'destination_dir': scratch
+        })
+        sbml_path = export_result.get('file_path')
+        if not sbml_path or not os.path.exists(sbml_path):
+            raise ValueError(f"Failed to export model to SBML. Result: {export_result}")
+        
+        # 4. Prepare MetQuest text input parameters
+        # MetQuest core expects model_id metabolite_id format (e.g. model_name cpd00027_c0)
+        # We parse the model name from the SBML filename
+        model_id = os.path.splitext(os.path.basename(sbml_path))[0]
+        
+        def write_met_file(filename, mets_list):
+            filepath = os.path.join(scratch, filename)
+            with open(filepath, 'w') as f:
+                for m in mets_list:
+                    f.write(f"{model_id} {m.strip()}\n")
+            return filepath
 
+        seed_file = write_met_file("seed_mets.txt", params.get('seeds', []))
+        source_file = write_met_file("source_mets.txt", params.get('sources', []))
+        target_file = write_met_file("target_mets.txt", params.get('targets', []))
+        
+        cutoff_file = os.path.join(scratch, "cutoff.txt")
+        with open(cutoff_file, 'w') as f:
+            f.write(str(params.get('cutoff', 15)) + "\n")
+            
+        # 5. Execute MetQuest core pipeline
+        print("Executing MetQuest core algorithm...")
+        try:
+            execute_all_codes(
+                xml_file=sbml_path,
+                seed_file=seed_file,
+                source_file=source_file,
+                target_file=target_file,
+                cutoff_file=cutoff_file,
+                output_dir=output_dir
+            )
+        except Exception as e:
+            raise RuntimeError(f"MetQuest execution failed: {str(e)}")
+            
+        # 6. Package results into KBaseReport
+        print("Packaging results into KBase report...")
+        report_client = KBaseReport(self.callback_url)
+        
+        # Upload output directory to Shock/DataFileUtil so report viewer can render it
+        upload_result = dfu.file_to_shock({
+            'file_path': output_dir,
+            'pack': 'zip'
+        })
+        
+        report_info = report_client.create_extended_report({
+            'message': 'MetQuest pathway analysis completed successfully.',
+            'direct_html_link_index': 0,
+            'file_links': [{
+                'shock_id': upload_result['shock_id'],
+                'name': 'metquest_results.zip',
+                'label': 'MetQuest Results Archive',
+                'description': 'Identified metabolic pathways and output files'
+            }],
+            'report_object_name': 'metquest_report_' + str(os.urandom(4).hex()),
+            'workspace_name': ws_name
+        })
+        
+        output = {
+            'report_name': report_info['report_name'],
+            'report_ref': report_info['report_ref']
+        }
+        #END run_metquest
         # At some point might do deeper type checking...
         if not isinstance(output, dict):
             raise ValueError('Method run_metquest return value ' +
