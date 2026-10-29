@@ -3,24 +3,20 @@
 import os
 import sys
 import shutil
+import uuid
+import io
 import logging
+from contextlib import redirect_stdout
 from unittest.mock import patch
 import cobra
 
 # 1. The Cloud Path Injection
-# KBase mounts the repo to /kb/module. We force Python to see the Raman Lab code.
 module_path = os.path.abspath(os.path.join("/kb/module", "lib", "metquest_core"))
 if module_path not in sys.path:
     sys.path.append(module_path)
 
-# Now it is safe to import the original execution engine
 from metquest.execute_metquest import execute_all_codes
-from installed_clients.DataFileUtilClient import DataFileUtil
-from installed_clients.KBaseReportClient import KBaseReport
-try:
-    from installed_clients.fba_toolsClient import fba_tools
-except ImportError:
-    fba_tools = None
+from MetQuest.baseclient import BaseClient
 
 logging.basicConfig(level=logging.INFO)
 #END_HEADER
@@ -71,61 +67,71 @@ class MetQuest:
         # ctx is the context object
         # return variables are: output
         #BEGIN run_metquest
-        logging.info("Starting MetQuest execution pipeline...")
-        dfu = DataFileUtil(self.callback_url)
+        logging.info(f"Starting MetQuest execution pipeline with params: {params}")
+
+        # Use built-in BaseClient to talk to KBase Callback Server (no installed_clients needed)
+        cb_client = BaseClient(self.callback_url, token=ctx.get('token'))
 
         # 1. Establish the nested directory structure MetQuest requires
-        wrapper_dir = os.path.join(self.shared_folder, "mq_sandbox")
+        wrapper_dir = os.path.join(self.shared_folder, "mq_sandbox_" + str(uuid.uuid4())[:8])
         target_dir = os.path.join(wrapper_dir, "batch_1")
-        if os.path.exists(wrapper_dir):
-            shutil.rmtree(wrapper_dir)
         os.makedirs(target_dir, exist_ok=True)
 
-        # 2. Pull down the KBase Cloud FBAModel and convert it to a local SBML XML file
-        model_input = params['input_fba_model']
+        # 2. Resolve KBase FBAModel reference and export to SBML XML via fba_tools
+        model_input = str(params['input_fba_model']).strip()
         ws_name = params['workspace_name']
-        logging.info(f"Downloading FBA model reference: {model_input}")
 
-        if "/" in str(model_input):
-            obj_info = dfu.get_object_info3({'objects': [{'ref': model_input}]})['infos'][0]
+        if "/" in model_input:
+            obj_info = cb_client.call_method(
+                'DataFileUtil.get_object_info3',
+                [{'objects': [{'ref': model_input}]}]
+            )['infos'][0]
             model_name = obj_info[1]
             model_ws = obj_info[7]
         else:
-            model_name = str(model_input)
+            model_name = model_input
             model_ws = ws_name
 
-        if fba_tools is not None:
-            fba = fba_tools(self.callback_url)
-            model_data = fba.model_to_sbml_file({'model_name': model_name, 'workspace_name': model_ws})
-        else:
-            model_data = dfu._client.call_method(
-                'fba_tools.model_to_sbml_file',
-                [{'model_name': model_name, 'workspace_name': model_ws}],
-                service_ver='release'
-            )[0]
-
+        logging.info(f"Exporting FBAModel {model_ws}/{model_name} to SBML...")
+        model_data = cb_client.call_method(
+            'fba_tools.model_to_sbml_file',
+            [{'model_name': model_name, 'workspace_name': model_ws}]
+        )
         sbml_path = os.path.join(target_dir, 'model.xml')
         shutil.copy(model_data['file_path'], sbml_path)
 
-        # 3. Read the model via Cobra to extract the exact <model id>
+        # 3. Read the model via Cobra to extract the exact <model id> and metabolite namespace
         try:
             cobra_model = cobra.io.read_sbml_model(sbml_path)
             model_id = cobra_model.id if cobra_model.id else "model"
-            logging.info(f"Successfully extracted Model ID prefix: {model_id}")
-            sample_mets = [m.id for m in cobra_model.metabolites[:10]]
-            logging.info(f"Sample metabolite IDs in SBML: {sample_mets}")
+            model_met_ids = {m.id for m in cobra_model.metabolites}
+            logging.info(f"Extracted Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
+            logging.info(f"Sample SBML metabolite IDs: {list(model_met_ids)[:10]}")
         except Exception as e:
             raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
 
-        # 4. Helper function to format and prefix metabolites
+        # 4. Helper function to match metabolite IDs to SBML namespace (handles 'M_' prefix if present) and prepend model_id
+        def resolve_met_id(raw_id):
+            if raw_id in model_met_ids:
+                return raw_id
+            if f"M_{raw_id}" in model_met_ids:
+                return f"M_{raw_id}"
+            if raw_id.startswith("M_") and raw_id[2:] in model_met_ids:
+                return raw_id[2:]
+            return raw_id
+
         def write_prefixed_file(filename, input_list):
             file_path = os.path.join(target_dir, filename)
             with open(file_path, 'w') as f:
                 for item in (input_list or []):
-                    item_str = str(item).strip()
-                    if item_str:
-                        clean_item = item_str if item_str.startswith(model_id + " ") else f"{model_id} {item_str}"
-                        f.write(f"{clean_item}\n")
+                    for token in str(item).replace(',', ' ').split():
+                        clean_token = token.strip()
+                        if clean_token:
+                            if clean_token.startswith(model_id + " "):
+                                f.write(f"{clean_token}\n")
+                            else:
+                                resolved = resolve_met_id(clean_token)
+                                f.write(f"{model_id} {resolved}\n")
 
         # 5. Write the 4 configuration text files into target_dir (batch_1)
         write_prefixed_file('seed_mets.txt', params.get('seeds', []))
@@ -139,24 +145,45 @@ class MetQuest:
                 f.write(f"{i}\n")
 
         # 6. Execute the MetQuest Engine Programmatically
-        logging.info(f"Auto-feeding execution path to engine: {wrapper_dir}")
+        # Note: execute_all_codes() checks sys.argv[1] first, and changes cwd via os.chdir()
+        logging.info(f"Executing MetQuest in {wrapper_dir}...")
+        original_cwd = os.getcwd()
+        stdout_buffer = io.StringIO()
         try:
-            with patch('builtins.input', return_value=wrapper_dir):
+            with patch.object(sys, 'argv', [sys.argv[0], wrapper_dir]), \
+                 patch('builtins.input', return_value=wrapper_dir), \
+                 redirect_stdout(stdout_buffer):
                 execute_all_codes()
-            logging.info("--- METQUEST ENGINE COMPLETED SUCCESSFULLY ---")
-        except Exception as e:
-            logging.error("--- METQUEST ENGINE CRASHED ---")
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"MetQuest core execution engine crashed: {str(e)}")
+        except BaseException as e:
+            os.chdir(original_cwd)
+            captured_so_far = stdout_buffer.getvalue()
+            logging.error(f"MetQuest Engine Output before exit:\n{captured_so_far}")
+            raise RuntimeError(f"MetQuest engine exited early: {str(e)}\nLog:\n{captured_so_far}")
+        finally:
+            os.chdir(original_cwd)
 
-        # 7. Package and upload the resulting pathway files back to KBase
-        logging.info("Packaging MetQuest output files for KBase Report...")
+        engine_stdout = stdout_buffer.getvalue()
+        logging.info(f"MetQuest Engine Console Output:\n{engine_stdout}")
+
+        # Save the console summary to a downloadable file inside Results/
+        results_dir = os.path.join(target_dir, "Results")
+        os.makedirs(results_dir, exist_ok=True)
+        summary_txt_path = os.path.join(results_dir, "MetQuest_Execution_Summary.txt")
+        with open(summary_txt_path, "w") as f:
+            f.write(engine_stdout)
+
+        # Create an HTML report viewer so results display directly inside the KBase Narrative
+        html_dir = os.path.join(self.shared_folder, "html_report_" + str(uuid.uuid4())[:8])
+        os.makedirs(html_dir, exist_ok=True)
+        html_path = os.path.join(html_dir, "index.html")
+
+        # Collect generated pathway files
         input_filenames = {'model.xml', 'seed_mets.txt', 'source_mets.txt', 'target_mets.txt', 'cutoff.txt'}
         output_files = []
+        pathway_previews = []
         for root, _, files in os.walk(wrapper_dir):
-            for file_name in files:
-                if file_name in input_filenames:
+            for file_name in sorted(files):
+                if file_name in input_filenames or file_name.endswith(('.pickle', '.gpickle')):
                     continue
                 file_path = os.path.join(root, file_name)
                 output_files.append({
@@ -164,10 +191,30 @@ class MetQuest:
                     'name': file_name,
                     'description': f'MetQuest generated output: {file_name}'
                 })
+                if file_name.endswith('.txt') and file_name != "MetQuest_Execution_Summary.txt":
+                    try:
+                        with open(file_path, 'r') as pf:
+                            content_preview = pf.read(20000)
+                        pathway_previews.append((file_name, content_preview))
+                    except Exception:
+                        pass
 
+        with open(html_path, "w") as hf:
+            hf.write("<html><head><meta charset='utf-8'><style>")
+            hf.write("body{font-family:monospace,sans-serif;padding:16px;background:#fafafa;color:#222;}")
+            hf.write("pre{background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow-x:auto;}")
+            hf.write("</style></head><body>")
+            hf.write(f"<h2>MetQuest Pathway Analysis Summary (Model: {model_id}, Cutoff: {user_cutoff})</h2>")
+            hf.write("<h3>Console & Scope Summary</h3>")
+            hf.write(f"<pre>{engine_stdout}</pre>")
+            for fname, preview in pathway_previews:
+                hf.write(f"<h3>File: {fname}</h3><pre>{preview}</pre>")
+            hf.write("</body></html>")
+
+        # 7. Upload output files & HTML report via DataFileUtil and KBaseReport
         uploaded_files = []
         if output_files:
-            uploaded_files = dfu.file_to_shock_mass(output_files)
+            uploaded_files = cb_client.call_method('DataFileUtil.file_to_shock_mass', [output_files])
 
         file_links = []
         for i, file_info in enumerate(output_files):
@@ -178,12 +225,26 @@ class MetQuest:
                 'description': file_info['description']
             })
 
-        report_client = KBaseReport(self.callback_url)
-        report_info = report_client.create_extended_report({
-            'message': f'MetQuest graph compilation and pathway search completed successfully (cutoff={user_cutoff}). Generated {len(file_links)} output file(s).',
-            'file_links': file_links,
-            'workspace_name': params['workspace_name']
-        })
+        html_upload = cb_client.call_method(
+            'DataFileUtil.file_to_shock',
+            [{'file_path': html_dir, 'pack': 'zip'}]
+        )
+
+        report_info = cb_client.call_method(
+            'KBaseReport.create_extended_report',
+            [{
+                'message': f'MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). Generated {len(file_links)} output file(s).',
+                'direct_html_link_index': 0,
+                'html_links': [{
+                    'shock_id': html_upload['shock_id'],
+                    'name': 'index.html',
+                    'label': 'MetQuest Pathway Report'
+                }],
+                'file_links': file_links,
+                'report_object_name': 'metquest_report_' + str(uuid.uuid4())[:8],
+                'workspace_name': ws_name
+            }]
+        )
 
         output = {
             'report_name': report_info['name'],
