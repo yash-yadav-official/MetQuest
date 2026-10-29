@@ -2,7 +2,10 @@
 #BEGIN_HEADER
 import os
 import sys
+import shutil
+import logging
 from unittest.mock import patch
+import cobra
 
 # 1. The Cloud Path Injection
 # KBase mounts the repo to /kb/module. We force Python to see the Raman Lab code.
@@ -12,6 +15,14 @@ if module_path not in sys.path:
 
 # Now it is safe to import the original execution engine
 from metquest.execute_metquest import execute_all_codes
+from installed_clients.DataFileUtilClient import DataFileUtil
+from installed_clients.KBaseReportClient import KBaseReport
+try:
+    from installed_clients.fba_toolsClient import fba_tools
+except ImportError:
+    fba_tools = None
+
+logging.basicConfig(level=logging.INFO)
 #END_HEADER
 
 
@@ -60,97 +71,133 @@ class MetQuest:
         # ctx is the context object
         # return variables are: output
         #BEGIN run_metquest
-        print(f"Starting MetQuest run with params: {params}")
-        
-        # 1. Setup workspace & paths
-        ws_name = params['workspace_name']
-        scratch = self.shared_folder
-        output_dir = os.path.join(scratch, "metquest_output")
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 2. Initialize clients
+        logging.info("Starting MetQuest execution pipeline...")
         dfu = DataFileUtil(self.callback_url)
-        fba = fba_tools(self.callback_url)
-        
-        # 3. Export FBAModel to SBML file
-        model_ref = params['input_fba_model']
-        print(f"Exporting model {model_ref} to SBML...")
-        export_result = fba.export_object_as_sbml({
-            'input_ref': model_ref,
-            'destination_dir': scratch
-        })
-        sbml_path = export_result.get('file_path')
-        if not sbml_path or not os.path.exists(sbml_path):
-            raise ValueError(f"Failed to export model to SBML. Result: {export_result}")
-        
-        # 4. Prepare MetQuest text input parameters
-        # MetQuest core expects model_id metabolite_id format (e.g. model_name cpd00027_c0)
-        # We parse the model name from the SBML filename
-        model_id = os.path.splitext(os.path.basename(sbml_path))[0]
-        
-        def write_met_file(filename, mets_list):
-            filepath = os.path.join(scratch, filename)
-            with open(filepath, 'w') as f:
-                for m in mets_list:
-                    f.write(f"{model_id} {m.strip()}\n")
-            return filepath
 
-        seed_file = write_met_file("seed_mets.txt", params.get('seeds', []))
-        source_file = write_met_file("source_mets.txt", params.get('sources', []))
-        target_file = write_met_file("target_mets.txt", params.get('targets', []))
-        
-        cutoff_file = os.path.join(scratch, "cutoff.txt")
-        with open(cutoff_file, 'w') as f:
-            f.write(str(params.get('cutoff', 15)) + "\n")
-            
-        # 5. Execute MetQuest core pipeline
-        print("Executing MetQuest core algorithm...")
+        # 1. Establish the nested directory structure MetQuest requires
+        wrapper_dir = os.path.join(self.shared_folder, "mq_sandbox")
+        target_dir = os.path.join(wrapper_dir, "batch_1")
+        if os.path.exists(wrapper_dir):
+            shutil.rmtree(wrapper_dir)
+        os.makedirs(target_dir, exist_ok=True)
+
+        # 2. Pull down the KBase Cloud FBAModel and convert it to a local SBML XML file
+        model_input = params['input_fba_model']
+        ws_name = params['workspace_name']
+        logging.info(f"Downloading FBA model reference: {model_input}")
+
+        if "/" in str(model_input):
+            obj_info = dfu.get_object_info3({'objects': [{'ref': model_input}]})['infos'][0]
+            model_name = obj_info[1]
+            model_ws = obj_info[7]
+        else:
+            model_name = str(model_input)
+            model_ws = ws_name
+
+        if fba_tools is not None:
+            fba = fba_tools(self.callback_url)
+            model_data = fba.model_to_sbml_file({'model_name': model_name, 'workspace_name': model_ws})
+        else:
+            model_data = dfu._client.call_method(
+                'fba_tools.model_to_sbml_file',
+                [{'model_name': model_name, 'workspace_name': model_ws}],
+                service_ver='release'
+            )[0]
+
+        sbml_path = os.path.join(target_dir, 'model.xml')
+        shutil.copy(model_data['file_path'], sbml_path)
+
+        # 3. Read the model via Cobra to extract the exact <model id>
         try:
-            execute_all_codes(
-                xml_file=sbml_path,
-                seed_file=seed_file,
-                source_file=source_file,
-                target_file=target_file,
-                cutoff_file=cutoff_file,
-                output_dir=output_dir
-            )
+            cobra_model = cobra.io.read_sbml_model(sbml_path)
+            model_id = cobra_model.id if cobra_model.id else "model"
+            logging.info(f"Successfully extracted Model ID prefix: {model_id}")
+            sample_mets = [m.id for m in cobra_model.metabolites[:10]]
+            logging.info(f"Sample metabolite IDs in SBML: {sample_mets}")
         except Exception as e:
-            raise RuntimeError(f"MetQuest execution failed: {str(e)}")
-            
-        # 6. Package results into KBaseReport
-        print("Packaging results into KBase report...")
+            raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
+
+        # 4. Helper function to format and prefix metabolites
+        def write_prefixed_file(filename, input_list):
+            file_path = os.path.join(target_dir, filename)
+            with open(file_path, 'w') as f:
+                for item in (input_list or []):
+                    item_str = str(item).strip()
+                    if item_str:
+                        clean_item = item_str if item_str.startswith(model_id + " ") else f"{model_id} {item_str}"
+                        f.write(f"{clean_item}\n")
+
+        # 5. Write the 4 configuration text files into target_dir (batch_1)
+        write_prefixed_file('seed_mets.txt', params.get('seeds', []))
+        write_prefixed_file('source_mets.txt', params.get('sources', []))
+        write_prefixed_file('target_mets.txt', params.get('targets', []))
+
+        user_cutoff = int(params.get('cutoff', params.get('pathway_length', 15)))
+        cutoff_file_path = os.path.join(target_dir, 'cutoff.txt')
+        with open(cutoff_file_path, 'w') as f:
+            for i in range(1, user_cutoff + 1):
+                f.write(f"{i}\n")
+
+        # 6. Execute the MetQuest Engine Programmatically
+        logging.info(f"Auto-feeding execution path to engine: {wrapper_dir}")
+        try:
+            with patch('builtins.input', return_value=wrapper_dir):
+                execute_all_codes()
+            logging.info("--- METQUEST ENGINE COMPLETED SUCCESSFULLY ---")
+        except Exception as e:
+            logging.error("--- METQUEST ENGINE CRASHED ---")
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"MetQuest core execution engine crashed: {str(e)}")
+
+        # 7. Package and upload the resulting pathway files back to KBase
+        logging.info("Packaging MetQuest output files for KBase Report...")
+        input_filenames = {'model.xml', 'seed_mets.txt', 'source_mets.txt', 'target_mets.txt', 'cutoff.txt'}
+        output_files = []
+        for root, _, files in os.walk(wrapper_dir):
+            for file_name in files:
+                if file_name in input_filenames:
+                    continue
+                file_path = os.path.join(root, file_name)
+                output_files.append({
+                    'path': file_path,
+                    'name': file_name,
+                    'description': f'MetQuest generated output: {file_name}'
+                })
+
+        uploaded_files = []
+        if output_files:
+            uploaded_files = dfu.file_to_shock_mass(output_files)
+
+        file_links = []
+        for i, file_info in enumerate(output_files):
+            file_links.append({
+                'shock_id': uploaded_files[i]['shock_id'],
+                'name': file_info['name'],
+                'label': file_info['name'],
+                'description': file_info['description']
+            })
+
         report_client = KBaseReport(self.callback_url)
-        
-        # Upload output directory to Shock/DataFileUtil so report viewer can render it
-        upload_result = dfu.file_to_shock({
-            'file_path': output_dir,
-            'pack': 'zip'
-        })
-        
         report_info = report_client.create_extended_report({
-            'message': 'MetQuest pathway analysis completed successfully.',
-            'direct_html_link_index': 0,
-            'file_links': [{
-                'shock_id': upload_result['shock_id'],
-                'name': 'metquest_results.zip',
-                'label': 'MetQuest Results Archive',
-                'description': 'Identified metabolic pathways and output files'
-            }],
-            'report_object_name': 'metquest_report_' + str(os.urandom(4).hex()),
-            'workspace_name': ws_name
+            'message': f'MetQuest graph compilation and pathway search completed successfully (cutoff={user_cutoff}). Generated {len(file_links)} output file(s).',
+            'file_links': file_links,
+            'workspace_name': params['workspace_name']
         })
-        
+
         output = {
-            'report_name': report_info['report_name'],
-            'report_ref': report_info['report_ref']
+            'report_name': report_info['name'],
+            'report_ref': report_info['ref']
         }
         #END run_metquest
+
         # At some point might do deeper type checking...
         if not isinstance(output, dict):
             raise ValueError('Method run_metquest return value ' +
                              'output is not type dict as required.')
         # return the results
         return [output]
+
     def status(self, ctx):
         #BEGIN_STATUS
         returnVal = {'state': "OK",
