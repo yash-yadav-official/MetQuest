@@ -16,6 +16,7 @@ if module_path not in sys.path:
 
 from metquest.execute_metquest import execute_all_codes
 from MetQuest.baseclient import BaseClient
+from Workspace.WorkspaceClient import Workspace
 
 logging.basicConfig(level=logging.INFO)
 #END_HEADER
@@ -27,13 +28,19 @@ class MetQuest:
     GIT_COMMIT_HASH = ""
 
     def __init__(self, config):
+        #BEGIN_CONSTRUCTOR
         self.callback_url = os.environ['SDK_CALLBACK_URL']
         self.shared_folder = config['scratch']
+        self.ws_url = config.get('workspace-url', 'https://kbase.us/services/ws')
+        #END_CONSTRUCTOR
         pass
 
     def run_metquest(self, ctx, params):
+        #BEGIN run_metquest
         logging.info(f"Starting MetQuest execution pipeline with params: {params}")
-        cb_client = BaseClient(self.callback_url, token=ctx.get('token'))
+        token = ctx.get('token')
+        cb_client = BaseClient(self.callback_url, token=token)
+        ws_client = Workspace(self.ws_url, token=token)
 
         wrapper_dir = os.path.join(self.shared_folder, "mq_sandbox_" + str(uuid.uuid4())[:8])
         target_dir = os.path.join(wrapper_dir, "batch_1")
@@ -41,18 +48,15 @@ class MetQuest:
 
         model_input = str(params['input_fba_model']).strip()
         ws_name = params['workspace_name']
+        model_ref = model_input if "/" in model_input else f"{ws_name}/{model_input}"
 
-        # Direct string parsing - zero RPC calls needed for metadata
-        if "/" in model_input:
-            parts = model_input.split("/")
-            model_name = parts[-1]
-            model_ws = parts[0]
-        else:
-            model_name = model_input
-            model_ws = ws_name
+        # Resolve UPA ref (e.g. '274976/3/1') to actual model_name and workspace_name via WorkspaceClient
+        obj_info = ws_client.get_object_info3({'objects': [{'ref': model_ref}]})['infos'][0]
+        model_name = obj_info[1]
+        model_ws = obj_info[7]
 
         logging.info(f"Exporting FBAModel '{model_name}' from workspace '{model_ws}' to SBML...")
-        model_data = cb_client.run_job(
+        model_data = cb_client.call_method(
             'fba_tools.model_to_sbml_file',
             [{'model_name': model_name, 'workspace_name': model_ws}]
         )
@@ -63,6 +67,7 @@ class MetQuest:
             model_id = cobra_model.id if cobra_model.id else model_name
             model_met_ids = {m.id for m in cobra_model.metabolites}
             logging.info(f"Extracted Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
+            logging.info(f"Sample SBML metabolite IDs: {list(model_met_ids)[:10]}")
         except Exception as e:
             raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
 
@@ -117,6 +122,8 @@ class MetQuest:
             os.chdir(original_cwd)
 
         engine_stdout = stdout_buffer.getvalue()
+        logging.info(f"MetQuest Console Output:\n{engine_stdout}")
+
         results_dir = os.path.join(target_dir, "Results")
         os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, "MetQuest_Execution_Summary.txt"), "w") as f:
@@ -160,7 +167,7 @@ class MetQuest:
 
         uploaded_files = []
         if output_files:
-            uploaded_files = cb_client.run_job('DataFileUtil.file_to_shock_mass', [output_files])
+            uploaded_files = cb_client.call_method('DataFileUtil.file_to_shock_mass', [output_files])
 
         file_links = []
         for i, file_info in enumerate(output_files):
@@ -171,12 +178,12 @@ class MetQuest:
                 'description': file_info['description']
             })
 
-        html_upload = cb_client.run_job(
+        html_upload = cb_client.call_method(
             'DataFileUtil.file_to_shock',
             [{'file_path': html_dir, 'pack': 'zip'}]
         )
 
-        report_info = cb_client.run_job(
+        report_info = cb_client.call_method(
             'KBaseReport.create_extended_report',
             [{
                 'message': f'MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). Generated {len(file_links)} output file(s).',
@@ -196,6 +203,7 @@ class MetQuest:
             'report_name': report_info['name'],
             'report_ref': report_info['ref']
         }
+        #END run_metquest
         return [output]
 
     def status(self, ctx):
