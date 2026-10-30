@@ -94,14 +94,12 @@ class MetQuest:
             'fba_tools.model_to_sbml_file',
             [{'model_name': model_name, 'workspace_name': model_ws}]
         )
-        logging.info(f"model_to_sbml_file returned: {model_data}")
         temp_sbml = model_data.get('path') or model_data.get('file_path')
         if not temp_sbml:
             raise ValueError(f"Could not find SBML path in fba_tools response: {model_data}")
 
         try:
             cobra_model = cobra.io.read_sbml_model(temp_sbml)
-            # Sanitize model_id so slashes/colons in KBase IDs (e.g. 'user:narrative/fba_ecoli') don't break file paths
             clean_id = re.sub(r'[^A-Za-z0-9_.-]', '_', model_name or cobra_model.id or "model")
             cobra_model.id = clean_id
             model_id = clean_id
@@ -161,13 +159,13 @@ class MetQuest:
         finally:
             os.chdir(original_cwd)
 
-        engine_stdout = stdout_buffer.getvalue()
+        engine_stdout = stdout_buffer.getvalue().strip() or "MetQuest execution completed."
         logging.info(f"MetQuest Console Output:\n{engine_stdout}")
 
         results_dir = os.path.join(target_dir, "Results")
         os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, "MetQuest_Execution_Summary.txt"), "w") as f:
-            f.write(engine_stdout)
+            f.write(engine_stdout + "\n")
 
         html_dir = os.path.join(self.shared_folder, "html_report_" + str(uuid.uuid4())[:8])
         os.makedirs(html_dir, exist_ok=True)
@@ -181,8 +179,10 @@ class MetQuest:
                 if file_name in input_filenames or file_name.endswith(('.pickle', '.gpickle')):
                     continue
                 file_path = os.path.join(root, file_name)
+                if not os.path.isfile(file_path) or os.path.getsize(file_path) == 0:
+                    continue
                 output_files.append({
-                    'path': file_path,
+                    'file_path': file_path,
                     'name': file_name,
                     'description': f'MetQuest generated output: {file_name}'
                 })
@@ -205,39 +205,56 @@ class MetQuest:
                 hf.write(f"<h3>File: {fname}</h3><pre>{preview}</pre>")
             hf.write("</body></html>")
 
-        uploaded_files = []
-        if output_files:
-            uploaded_files = cb_client.call_method('DataFileUtil.file_to_shock_mass', [output_files])
-
+        # Upload each output file to Shock using 'file_path' (required by DataFileUtil.file_to_shock)
         file_links = []
-        for i, file_info in enumerate(output_files):
+        for file_info in output_files:
+            shock_res = cb_client.call_method(
+                'DataFileUtil.file_to_shock',
+                [{'file_path': file_info['file_path']}]
+            )
             file_links.append({
-                'shock_id': uploaded_files[i]['shock_id'],
+                'shock_id': shock_res['shock_id'],
                 'name': file_info['name'],
                 'label': file_info['name'],
                 'description': file_info['description']
             })
 
-        html_upload = cb_client.call_method(
-            'DataFileUtil.file_to_shock',
-            [{'file_path': html_dir, 'pack': 'zip'}]
+        report_message = (
+            f"MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). "
+            f"Generated {len(file_links)} output file(s).\n\n{engine_stdout[:1500]}"
         )
 
-        report_info = cb_client.call_method(
-            'KBaseReport.create_extended_report',
-            [{
-                'message': f'MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). Generated {len(file_links)} output file(s).',
-                'direct_html_link_index': 0,
-                'html_links': [{
-                    'shock_id': html_upload['shock_id'],
-                    'name': 'index.html',
-                    'label': 'MetQuest Pathway Report'
-                }],
-                'file_links': file_links,
-                'report_object_name': 'metquest_report_' + str(uuid.uuid4())[:8],
-                'workspace_name': ws_name
-            }]
-        )
+        try:
+            html_upload = cb_client.call_method(
+                'DataFileUtil.file_to_shock',
+                [{'file_path': html_dir, 'pack': 'zip'}]
+            )
+            report_info = cb_client.call_method(
+                'KBaseReport.create_extended_report',
+                [{
+                    'message': report_message,
+                    'direct_html_link_index': 0,
+                    'html_links': [{
+                        'shock_id': html_upload['shock_id'],
+                        'name': 'index.html',
+                        'label': 'MetQuest Pathway Report'
+                    }],
+                    'file_links': file_links,
+                    'report_object_name': 'metquest_report_' + str(uuid.uuid4())[:8],
+                    'workspace_name': ws_name
+                }]
+            )
+        except Exception as e:
+            logging.warning(f"HTML zip report fallback triggered ({e}); creating standard extended report.")
+            report_info = cb_client.call_method(
+                'KBaseReport.create_extended_report',
+                [{
+                    'message': report_message,
+                    'file_links': file_links,
+                    'report_object_name': 'metquest_report_' + str(uuid.uuid4())[:8],
+                    'workspace_name': ws_name
+                }]
+            )
 
         output = {
             'report_name': report_info['name'],
