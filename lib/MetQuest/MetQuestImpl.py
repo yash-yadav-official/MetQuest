@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 #BEGIN_HEADER
 import os
+import re
 import sys
 import shutil
 import uuid
@@ -93,19 +94,25 @@ class MetQuest:
             'fba_tools.model_to_sbml_file',
             [{'model_name': model_name, 'workspace_name': model_ws}]
         )
-        temp_sbml = model_data['file_path']
+        logging.info(f"model_to_sbml_file returned: {model_data}")
+        temp_sbml = model_data.get('path') or model_data.get('file_path')
+        if not temp_sbml:
+            raise ValueError(f"Could not find SBML path in fba_tools response: {model_data}")
 
         try:
             cobra_model = cobra.io.read_sbml_model(temp_sbml)
-            model_id = cobra_model.id if cobra_model.id else model_name
+            # Sanitize model_id so slashes/colons in KBase IDs (e.g. 'user:narrative/fba_ecoli') don't break file paths
+            clean_id = re.sub(r'[^A-Za-z0-9_.-]', '_', model_name or cobra_model.id or "model")
+            cobra_model.id = clean_id
+            model_id = clean_id
             model_met_ids = {m.id for m in cobra_model.metabolites}
-            logging.info(f"Extracted Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
+            logging.info(f"Using sanitized Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
             logging.info(f"Sample SBML metabolite IDs: {list(model_met_ids)[:10]}")
         except Exception as e:
             raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
 
         sbml_path = os.path.join(target_dir, f"{model_id}.xml")
-        shutil.copy(temp_sbml, sbml_path)
+        cobra.io.write_sbml_model(cobra_model, sbml_path)
 
         def resolve_met_id(raw_id):
             if raw_id in model_met_ids:
