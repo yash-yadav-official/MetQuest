@@ -22,16 +22,41 @@ logging.basicConfig(level=logging.INFO)
 
 
 class MetQuest:
+    '''
+    Module Name:
+    MetQuest
+
+    Module Description:
+    A KBase module: MetQuest
+    '''
+
     VERSION = "0.0.1"
     GIT_URL = ""
     GIT_COMMIT_HASH = ""
 
+    #BEGIN_CLASS_HEADER
+    #END_CLASS_HEADER
+
     def __init__(self, config):
+        #BEGIN_CONSTRUCTOR
         self.callback_url = os.environ['SDK_CALLBACK_URL']
         self.shared_folder = config['scratch']
+        #END_CONSTRUCTOR
         pass
 
     def run_metquest(self, ctx, params):
+        """
+        :param params: instance of type "MetQuestParams" -> structure:
+           parameter "workspace_name" of String, parameter "input_fba_model"
+           of String, parameter "seeds" of list of String, parameter
+           "sources" of list of String, parameter "targets" of list of
+           String, parameter "cutoff" of Long
+        :returns: instance of type "MetQuestResults" -> structure: parameter
+           "report_name" of String, parameter "report_ref" of String
+        """
+        # ctx is the context object
+        # return variables are: output
+        #BEGIN run_metquest
         logging.info(f"Starting MetQuest execution pipeline with params: {params}")
         cb_client = BaseClient(self.callback_url, token=ctx.get('token'))
 
@@ -41,31 +66,35 @@ class MetQuest:
 
         model_input = str(params['input_fba_model']).strip()
         ws_name = params['workspace_name']
+        model_ref = model_input if "/" in model_input else f"{ws_name}/{model_input}"
 
-        # Parse workspace and model name directly from reference string (e.g., '12345/3/1' or 'fba_ecoli')
-        if "/" in model_input:
-            parts = model_input.split("/")
-            model_name = parts[-1]
-            model_ws = ws_name if len(parts) == 1 else parts[0]
-        else:
-            model_name = model_input
-            model_ws = ws_name
+        # Resolve exact model_name and workspace_name via async SDK run_job
+        obj_info = cb_client.run_job(
+            'DataFileUtil.get_object_info3',
+            [{'objects': [{'ref': model_ref}]}]
+        )['infos'][0]
+        model_name = obj_info[1]
+        model_ws = obj_info[7]
 
         logging.info(f"Exporting FBAModel '{model_name}' from workspace '{model_ws}' to SBML...")
-        model_data = cb_client.call_method(
+        model_data = cb_client.run_job(
             'fba_tools.model_to_sbml_file',
             [{'model_name': model_name, 'workspace_name': model_ws}]
         )
-        sbml_path = os.path.join(target_dir, 'model.xml')
-        shutil.copy(model_data['file_path'], sbml_path)
+        temp_sbml = model_data['file_path']
 
         try:
-            cobra_model = cobra.io.read_sbml_model(sbml_path)
-            model_id = cobra_model.id if cobra_model.id else "model"
+            cobra_model = cobra.io.read_sbml_model(temp_sbml)
+            model_id = cobra_model.id if cobra_model.id else model_name
             model_met_ids = {m.id for m in cobra_model.metabolites}
             logging.info(f"Extracted Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
+            logging.info(f"Sample SBML metabolite IDs: {list(model_met_ids)[:10]}")
         except Exception as e:
             raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
+
+        # Save SBML with filename matching model_id so MetQuest graph prefixes align
+        sbml_path = os.path.join(target_dir, f"{model_id}.xml")
+        shutil.copy(temp_sbml, sbml_path)
 
         def resolve_met_id(raw_id):
             if raw_id in model_met_ids:
@@ -115,6 +144,8 @@ class MetQuest:
             os.chdir(original_cwd)
 
         engine_stdout = stdout_buffer.getvalue()
+        logging.info(f"MetQuest Console Output:\n{engine_stdout}")
+
         results_dir = os.path.join(target_dir, "Results")
         os.makedirs(results_dir, exist_ok=True)
         with open(os.path.join(results_dir, "MetQuest_Execution_Summary.txt"), "w") as f:
@@ -124,7 +155,7 @@ class MetQuest:
         os.makedirs(html_dir, exist_ok=True)
         html_path = os.path.join(html_dir, "index.html")
 
-        input_filenames = {'model.xml', 'seed_mets.txt', 'source_mets.txt', 'target_mets.txt', 'cutoff.txt'}
+        input_filenames = {f"{model_id}.xml", 'model.xml', 'seed_mets.txt', 'source_mets.txt', 'target_mets.txt', 'cutoff.txt'}
         output_files = []
         pathway_previews = []
         for root, _, files in os.walk(wrapper_dir):
@@ -158,7 +189,7 @@ class MetQuest:
 
         uploaded_files = []
         if output_files:
-            uploaded_files = cb_client.call_method('DataFileUtil.file_to_shock_mass', [output_files])
+            uploaded_files = cb_client.run_job('DataFileUtil.file_to_shock_mass', [output_files])
 
         file_links = []
         for i, file_info in enumerate(output_files):
@@ -169,12 +200,12 @@ class MetQuest:
                 'description': file_info['description']
             })
 
-        html_upload = cb_client.call_method(
+        html_upload = cb_client.run_job(
             'DataFileUtil.file_to_shock',
             [{'file_path': html_dir, 'pack': 'zip'}]
         )
 
-        report_info = cb_client.call_method(
+        report_info = cb_client.run_job(
             'KBaseReport.create_extended_report',
             [{
                 'message': f'MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). Generated {len(file_links)} output file(s).',
@@ -194,8 +225,19 @@ class MetQuest:
             'report_name': report_info['name'],
             'report_ref': report_info['ref']
         }
+        #END run_metquest
+
+        if not isinstance(output, dict):
+            raise ValueError('Method run_metquest return value ' +
+                             'output is not type dict as required.')
         return [output]
 
     def status(self, ctx):
-        returnVal = {'state': "OK", 'message': "", 'version': self.VERSION, 'git_url': self.GIT_URL, 'git_commit_hash': self.GIT_COMMIT_HASH}
+        #BEGIN_STATUS
+        returnVal = {'state': "OK",
+                     'message': "",
+                     'version': self.VERSION,
+                     'git_url': self.GIT_URL,
+                     'git_commit_hash': self.GIT_COMMIT_HASH}
+        #END_STATUS
         return [returnVal]
