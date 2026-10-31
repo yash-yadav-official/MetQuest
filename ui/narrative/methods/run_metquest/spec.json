@@ -1,14 +1,17 @@
 {
-    "ver": "1.0.0",
+    "ver": "0.0.1",
     "authors": [
-        "pratyaysengupta", "yashyadav"
+        "yashyadav"
     ],
-    "contact": "http://kbase.us/contact-us/",
+    "contact": "https://github.com/yash-yadav-official/MetQuest/issues",
     "visible": true,
-    "categories": ["active"],
+    "categories": [
+        "active",
+        "metabolic_modeling"
+    ],
     "widgets": {
         "input": null,
-        "output": "kbaseNarrativeOutputCell"
+        "output": "no-display"
     },
     "parameters": [
         {
@@ -16,10 +19,10 @@
             "optional": false,
             "advanced": false,
             "allow_multiple": false,
-            "default_values": [""],
+            "default_values": [ "" ],
             "field_type": "text",
             "text_options": {
-                "valid_ws_types": ["KBaseFBA.FBAModel"]
+                "valid_ws_types": [ "KBaseFBA.FBAModel" ]
             }
         },
         {
@@ -27,40 +30,51 @@
             "optional": false,
             "advanced": false,
             "allow_multiple": true,
-            "default_values": [""],
-            "field_type": "text",
-            "text_options": {
-                "validate_as": "string"
-            }
+            "default_values": [
+                "cpd00001_c0",
+                "cpd00002_c0",
+                "cpd00003_c0",
+                "cpd00004_c0",
+                "cpd00005_c0",
+                "cpd00006_c0",
+                "cpd00007_c0",
+                "cpd00008_c0",
+                "cpd00009_c0",
+                "cpd00011_c0",
+                "cpd00013_c0",
+                "cpd00048_c0",
+                "cpd00067_c0",
+                "cpd00205_c0",
+                "cpd00027_e0"
+            ],
+            "field_type": "text"
         },
         {
             "id": "sources",
             "optional": false,
             "advanced": false,
             "allow_multiple": true,
-            "default_values": [""],
-            "field_type": "text",
-            "text_options": {
-                "validate_as": "string"
-            }
+            "default_values": [
+                "cpd00079_c0"
+            ],
+            "field_type": "text"
         },
         {
             "id": "targets",
             "optional": false,
             "advanced": false,
             "allow_multiple": true,
-            "default_values": [""],
-            "field_type": "text",
-            "text_options": {
-                "validate_as": "string"
-            }
+            "default_values": [
+                "cpd00020_c0"
+            ],
+            "field_type": "text"
         },
         {
             "id": "cutoff",
             "optional": false,
             "advanced": false,
             "allow_multiple": false,
-            "default_values": ["5"],
+            "default_values": [ "15" ],
             "field_type": "text",
             "text_options": {
                 "validate_as": "int",
@@ -81,8 +95,7 @@
                 },
                 {
                     "input_parameter": "input_fba_model",
-                    "target_property": "input_fba_model",
-                    "target_type_transform": "resolved-ref"
+                    "target_property": "input_fba_model"
                 },
                 {
                     "input_parameter": "seeds",
@@ -98,8 +111,7 @@
                 },
                 {
                     "input_parameter": "cutoff",
-                    "target_property": "cutoff",
-                    "target_type_transform": "int"
+                    "target_property": "cutoff"
                 }
             ],
             "output_mapping": [

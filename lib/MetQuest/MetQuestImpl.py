@@ -3,9 +3,9 @@
 import os
 import re
 import sys
-import shutil
 import uuid
 import io
+import html
 import logging
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -39,8 +39,8 @@ class MetQuest:
     # the latter method is running.
     ######################################### noqa
     VERSION = "0.0.1"
-    GIT_URL = ""
-    GIT_COMMIT_HASH = ""
+    GIT_URL = "https://github.com/yash-yadav-official/MetQuest"
+    GIT_COMMIT_HASH = "main"
 
     #BEGIN_CLASS_HEADER
     #END_CLASS_HEADER
@@ -104,8 +104,9 @@ class MetQuest:
             cobra_model.id = clean_id
             model_id = clean_id
             model_met_ids = {m.id for m in cobra_model.metabolites}
+            met_name_map = {m.id: (m.name or m.id) for m in cobra_model.metabolites}
+            rxn_name_map = {r.id: (r.name or r.id) for r in cobra_model.reactions}
             logging.info(f"Using sanitized Model ID: '{model_id}' with {len(model_met_ids)} metabolites.")
-            logging.info(f"Sample SBML metabolite IDs: {list(model_met_ids)[:10]}")
         except Exception as e:
             raise ValueError(f"Failed to parse SBML Model via Cobra: {str(e)}")
 
@@ -193,35 +194,69 @@ class MetQuest:
                     except Exception:
                         pass
 
+        # Extract referenced rxn and cpd IDs from stdout & previews for human-readable legend
+        combined_text = engine_stdout + "\n" + "\n".join(p[1] for p in pathway_previews)
+        referenced_rxns = sorted(set(re.findall(r'rxn\d+_[a-z0-9]+', combined_text)))
+        referenced_cpds = sorted(set(re.findall(r'cpd\d+_[a-z0-9]+', combined_text)))
+
         with open(html_path, "w") as hf:
             hf.write("<html><head><meta charset='utf-8'><style>")
-            hf.write("body{font-family:monospace,sans-serif;padding:16px;background:#fafafa;color:#222;}")
-            hf.write("pre{background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:6px;overflow-x:auto;}")
+            hf.write("body{font-family:system-ui,-apple-system,sans-serif;padding:20px;background:#f8f9fa;color:#212529;line-height:1.5;}")
+            hf.write("h2,h3{color:#0b5ed7;border-bottom:1px solid #dee2e6;padding-bottom:6px;}")
+            hf.write("pre{background:#1e1e1e;color:#d4d4d4;padding:14px;border-radius:6px;overflow-x:auto;font-family:monospace;font-size:13px;}")
+            hf.write("table{border-collapse:collapse;width:100%;margin-bottom:20px;background:#fff;font-size:13px;}")
+            hf.write("th,td{border:1px solid #dee2e6;padding:8px 12px;text-align:left;}")
+            hf.write("th{background:#e9ecef;font-weight:600;}")
             hf.write("</style></head><body>")
-            hf.write(f"<h2>MetQuest Pathway Analysis Summary (Model: {model_id}, Cutoff: {user_cutoff})</h2>")
-            hf.write("<h3>Console & Scope Summary</h3>")
-            hf.write(f"<pre>{engine_stdout}</pre>")
+            hf.write(f"<h2>MetQuest Pathway Analysis Report &mdash; Model: <code>{html.escape(model_id)}</code> (Cutoff: {user_cutoff})</h2>")
+
+            if referenced_rxns or referenced_cpds:
+                hf.write("<h3>Reaction &amp; Metabolite Name Reference</h3>")
+                hf.write("<table><thead><tr><th>ID</th><th>Type</th><th>Biochemical Name in Model</th></tr></thead><tbody>")
+                for rid in referenced_rxns:
+                    rname = rxn_name_map.get(rid) or rxn_name_map.get(f"R_{rid}") or "Reaction in model"
+                    hf.write(f"<tr><td><code>{html.escape(rid)}</code></td><td>Reaction</td><td>{html.escape(rname)}</td></tr>")
+                for cid in referenced_cpds:
+                    cname = met_name_map.get(cid) or met_name_map.get(f"M_{cid}") or "Metabolite in model"
+                    hf.write(f"<tr><td><code>{html.escape(cid)}</code></td><td>Metabolite</td><td>{html.escape(cname)}</td></tr>")
+                hf.write("</tbody></table>")
+
+            hf.write("<h3>Execution &amp; Scope Summary</h3>")
+            hf.write(f"<pre>{html.escape(engine_stdout)}</pre>")
             for fname, preview in pathway_previews:
-                hf.write(f"<h3>File: {fname}</h3><pre>{preview}</pre>")
+                hf.write(f"<h3>Generated Pathway File: <code>{html.escape(fname)}</code></h3><pre>{html.escape(preview)}</pre>")
             hf.write("</body></html>")
 
-        # Upload each output file to Shock using 'file_path' (required by DataFileUtil.file_to_shock)
+        # Fast batch upload to Shock via file_to_shock_mass (with fallback)
         file_links = []
-        for file_info in output_files:
-            shock_res = cb_client.call_method(
-                'DataFileUtil.file_to_shock',
-                [{'file_path': file_info['file_path']}]
-            )
-            file_links.append({
-                'shock_id': shock_res['shock_id'],
-                'name': file_info['name'],
-                'label': file_info['name'],
-                'description': file_info['description']
-            })
+        if output_files:
+            try:
+                mass_inputs = [{'file_path': f['file_path']} for f in output_files]
+                uploaded_files = cb_client.call_method('DataFileUtil.file_to_shock_mass', [mass_inputs])
+                for i, file_info in enumerate(output_files):
+                    file_links.append({
+                        'shock_id': uploaded_files[i]['shock_id'],
+                        'name': file_info['name'],
+                        'label': file_info['name'],
+                        'description': file_info['description']
+                    })
+            except Exception as e:
+                logging.warning(f"file_to_shock_mass fallback triggered ({e}); uploading sequentially.")
+                for file_info in output_files:
+                    shock_res = cb_client.call_method(
+                        'DataFileUtil.file_to_shock',
+                        [{'file_path': file_info['file_path']}]
+                    )
+                    file_links.append({
+                        'shock_id': shock_res['shock_id'],
+                        'name': file_info['name'],
+                        'label': file_info['name'],
+                        'description': file_info['description']
+                    })
 
         report_message = (
             f"MetQuest pathway analysis completed (Model ID: {model_id}, Cutoff: {user_cutoff}). "
-            f"Generated {len(file_links)} output file(s).\n\n{engine_stdout[:1500]}"
+            f"Generated {len(file_links)} output file(s)."
         )
 
         try:
@@ -249,7 +284,7 @@ class MetQuest:
             report_info = cb_client.call_method(
                 'KBaseReport.create_extended_report',
                 [{
-                    'message': report_message,
+                    'message': report_message + "\n\n" + engine_stdout[:1500],
                     'file_links': file_links,
                     'report_object_name': 'metquest_report_' + str(uuid.uuid4())[:8],
                     'workspace_name': ws_name

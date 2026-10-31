@@ -2,7 +2,7 @@ module-name:
     MetQuest
 
 module-description:
-    MetQuest pathway analysis module for KBase
+    Graph-theoretic enumeration of branched and cyclic biosynthetic pathways in genome-scale metabolic models using MetQuest.
 
 service-language:
     python
@@ -11,4 +11,4 @@ module-version:
     0.0.1
 
 owners:
-    [pratyaysengupta, yashyadav]
+    [yashyadav]

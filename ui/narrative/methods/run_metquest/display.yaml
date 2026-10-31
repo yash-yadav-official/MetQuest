@@ -1,48 +1,59 @@
 name: Run MetQuest Pathway Analysis
 
 tooltip: |
-    Identify all possible metabolic pathways from genome-scale reconstructions using dynamic programming.
+    Enumerate branched and cyclic metabolic pathways between source and target metabolites using MetQuest's graph-theoretic guided breadth-first search.
 
 screenshots: []
-icon: icon.png
 
-subtitle: |
-    MetQuest computes acyclic, branched, and cyclic pathways between specified seed, source, and target metabolites.
+icon: icon.png
 
 suggestions:
     apps:
         related:
-            []
+            - fba_tools/build_metabolic_model
+            - fba_tools/run_flux_balance_analysis
         next:
-            []
+            - fba_tools/run_flux_balance_analysis
 
 parameters:
     input_fba_model:
-        ui-name: |
-            Metabolic Model
-        short-hint: |
-            Select the genome-scale FBA model (COBRA compatible) to analyze.
+        ui-name: Metabolic Model (FBAModel)
+        short-hint: Select the KBase FBAModel object to analyze.
+        long-hint: |
+            A genome-scale metabolic model (KBaseFBA.FBAModel) built in KBase (e.g., via Build Metabolic Model). It will be exported to SBML and converted into a directed bipartite reaction-metabolite graph.
     seeds:
-        ui-name: |
-            Seed Metabolites
-        short-hint: |
-            Enter the list of seed metabolites present in the environment (one per entry).
+        ui-name: Seed Metabolites
+        short-hint: Currency cofactors, inorganic ions, and medium components assumed to be available (e.g., cpd00001_c0, cpd00002_c0).
+        long-hint: |
+            ModelSEED or BiGG compound IDs representing currency metabolites (H2O, ATP, ADP, NAD, NADH, NADP, NADPH, Pi, H+) and medium nutrients. Do not include your Source Metabolite in the Seed list if you want pathways traced explicitly from the Source.
     sources:
-        ui-name: |
-            Source Metabolites
-        short-hint: |
-            Enter the starting/source metabolites for the pathway search.
+        ui-name: Source Metabolites
+        short-hint: Starting carbon/substrate metabolite ID(s) from which pathways originate (e.g., cpd00079_c0 for D-glucose-6-phosphate).
+        long-hint: |
+            Compound ID(s) with compartment suffix (e.g., cpd00079_c0) serving as the starting point for pathway enumeration. Ensure this metabolite is present in the model and omitted from the Seed Metabolites list.
     targets:
-        ui-name: |
-            Target Metabolites
-        short-hint: |
-            Enter the destination/target metabolites you want the pathways to reach.
+        ui-name: Target Metabolites
+        short-hint: Destination metabolite ID(s) to synthesize (e.g., cpd00020_c0 for Pyruvate).
+        long-hint: |
+            Compound ID(s) with compartment suffix (e.g., cpd00020_c0) for which MetQuest will enumerate all branched and cyclic synthesis pathways up to the specified cutoff.
     cutoff:
-        ui-name: |
-            Pathway Length Cutoff
-        short-hint: |
-            Maximum number of reaction steps allowed in a calculated pathway (1 to 50).
+        ui-name: Pathway Length Cutoff
+        short-hint: Maximum number of reaction steps in the enumerated pathways (1 to 50, default 15).
+        long-hint: |
+            Upper bound on pathway size (number of reactions) evaluated by MetQuest across cutoffs 1 through N.
 
 description: |
-    <p>MetQuest is a dynamic programming-based algorithm designed by the Raman Lab at IIT Madras for identifying all possible pathways within metabolic networks between designated source and target metabolites.</p>
-    <p>By defining specific environmental seed conditions and an upper bound pathway length cutoff, MetQuest systematically maps out cyclic, acyclic, and branched reaction routes, providing deep insights into metabolic engineering capabilities and path generation constraints.</p>
+    <p><b>MetQuest</b> is a dynamic programming and graph-theoretic algorithm developed at the Computational Systems Biology Laboratory (IIT Madras) that enumerates all possible branched and cyclic metabolic pathways of a specified size between source and target metabolites in genome-scale metabolic networks.</p>
+    <p>Unlike stoichiometric flux methods that identify a single optimal flux distribution, MetQuest constructs a directed bipartite graph of the metabolic network, determines the reachable metabolic scope from a user-defined set of <b>Seed Metabolites</b> via a Guided Breadth-First Search (GBFS), and exhaustively assembles all valid synthesis pathways from <b>Source Metabolites</b> to <b>Target Metabolites</b> up to the specified <b>Pathway Length Cutoff</b>.</p>
+    <h4>Key Outputs</h4>
+    <ul>
+        <li><b>Interactive Summary & Pathway Report:</b> Displays graph topology statistics, reachable metabolite scope, most dissimilar pathway combinations (via Jaccard index), frequency-ranked bottleneck reactions, and human-readable reaction/compound names.</li>
+        <li><b>Downloadable Pathway Files:</b> Full text enumerations of all branched pathways from seeds, branched pathways from sources, and cyclic pathways across each pathway length cutoff.</li>
+    </ul>
+
+publications:
+    -
+        display-text: |
+            Ravikrishnan A, Nasre M, Raman K (2018) Enumerating all possible biosynthetic pathways in metabolic networks. Scientific Reports 8, 9932.
+        link: https://doi.org/10.1038/s41598-018-28007-7
+        pmid: "29967470"
